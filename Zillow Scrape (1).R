@@ -1,7 +1,7 @@
 rm(list=ls())
 
 getwd()
-setwd('/Users/Alex/Desktop/My Projects/Research/Buffalo Housing')
+setwd('/Users/.../Buffalo Housing')
 
 library(tidyverse)
 library(rvest)
