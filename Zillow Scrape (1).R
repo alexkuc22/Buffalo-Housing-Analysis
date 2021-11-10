@@ -13,7 +13,7 @@ library(scorecard)
 library(data.table)
 library(finalfit)
 library(stargazer)
-
+library(lmtest)
 
 
 ###create urls for all webpages to be used
@@ -99,8 +99,8 @@ for (i in df40$addresses){
     bd <- det %>% html_element('.ds-bed-bath-living-area-container span:nth-child(1)') %>%    html_text()
     Zest_det <- det %>% html_element('p')
     Market_class <- Zest_det %>% html_element('span:nth-child(1)') %>% html_text()
-    Zestimate <- Zest_det %>% html_element('span:nth-child(2)') %>%html_text() %>%     str_remove('Zestimate®: $')
-    Rent_Zestimate <- Zest_det %>% html_element('span:nth-child(3)') %>% html_text() %>% str_remove('Rent Zestimate®: $')
+    Zestimate <- Zest_det %>% html_element('span:nth-child(2)') %>%html_text() %>%     str_remove('ZestimateÂ®: $')
+    Rent_Zestimate <- Zest_det %>% html_element('span:nth-child(3)') %>% html_text() %>% str_remove('Rent ZestimateÂ®: $')
     records <- tibble(det = det1, bd = bd, Addr = Addr, Market_class = Market_class, Zestimate = Zestimate, Rent_Zestimate = Rent_Zestimate)
     End_time <- Sys.time()
     data2 <- rbind(data2, records)
@@ -228,8 +228,6 @@ rm(list= ls()[!(ls() %in% c('Zest_unique','Buff_address', 'House_address', 'Hous
 write.csv(Zest_unique, 'Zest_unique.csv')
 
 ###bring in ACS DATA and separate by race, income, and housing characteristics
-
-
 ####graphs#####
 Zest_unique$Zestimate <- gsub(',', '', Zest_unique$Zestimate)
 Zest_unique$Zestimate <- as.numeric(Zest_unique$Zestimate)
@@ -409,16 +407,86 @@ Analysis_DF3 %>% rename(Median_Inc = B19013e1)
 ##export Analysis_DF3 for maps in arcGIS
 write.csv(Analysis_DF3, 'Analysis_DF.csv')
 
+##sold model to show distribution of sold properties and compare accuracy with Zestimate
+Deeds <- read_xlsx('Deeds jan-oct21 2021.xlsx')
+
+#get zipcode as a variable
+Deeds$Zip <- word(Deeds$Address, -1)
+
+#data all parties involved in transfer so many have duplicates
+Deeds2 <- Deeds[!duplicated(Deeds[ , 'file_num']),]
+Zip_codes <- (14201:14225)
+Deeds2$Zip <- as.numeric(Deeds2$Zip)
+
+#only use buffalo zip codes
+Deeds2 <- Deeds2 %>% filter(Zip %in% Zip_codes)
+
+#much of the data represents simple deeds transfers to an llC or between family members. These should be excluded as they do not represent market participants
+Deeds2 <- Deeds2 %>% filter(Consideration > 10000)
+Deeds3 <- Deeds %>% filter(Consideration > 10000)
+#Create unique id to link to Analysis DF for GEOID
+Deeds2$Street <- word(Deeds2$Address, 1, 2)
+Deeds2$City <- ('BUFFALO, NY')
+Deeds2$first <- paste(Deeds2$Street, Deeds2$City, sep = ', ')
+Deeds2$UNIQUE <- paste(Deeds2$first, Deeds2$Zip, sep = ' ')
+
+House_address$Temp <- paste(House_address$ADDRESS, House_address$CITY, House_address$STATE, sep = ', ')
+House_address$UNIQUE <- paste(House_address$Temp, House_address$ZIP.CODE..5.DIGIT., sep = ' ')
+#combine with Analysis DF
+Sold_Data <- left_join(Deeds2, House_address, by = 'UNIQUE')
+Sold_Data <- Sold_Data[!is.na(Sold_Data$TOTAL.VALUE),]
+#join with ACS data for census block demographic variables
+Sold_Data$CENSUS.TRACT <- as.character(Sold_Data$CENSUS.TRACT)
+
+##fill leading zeros for census tract ID in order to merge with census data
+Sold_Data$CENSUS.TRACT <- str_pad(Sold_Data$CENSUS.TRACT, 6, pad = '0')
+Sold_Data$GEOID <- paste('360290', Sold_Data$CENSUS.TRACT, sep = '')
+Sold_Data$GEOID <- as.character(Sold_Data$GEOID)
+Income_Character$GEOID <- as.character(Income_Character$GEOID)
+Race_Character2$GEOID <- as.character(Race_Character2$GEOID)
+Sold_Data <- left_join(Sold_Data, Income_Character, by = 'GEOID')
+Sold_Data <- left_join(Sold_Data, Race_Character2, by = 'GEOID')
+
+Sold_Data$Perc_Diff <- ((Sold_Data$Consideration-Sold_Data$TOTAL.VALUE)/Sold_Data$TOTAL.VALUE)
+Sold_Data$YARD.SIZE <- ((Sold_Data$FRONT * Sold_Data$DEPTH)-Sold_Data$FIRST.STORY.AREA)
+#only unique transactions
+Sold_Data <- Sold_Data[!duplicated(Sold_Data[ , 'file_num']),]
+
+write.csv(Sold_Data, 'Sold_Data.csv')
+
+Summary_SOld <- Sold_Data %>% group_by(GEOID) %>% summarise(count = n())
+
+write.csv(Summary_SOld, 'Sold_count.csv')
+
+##model to vet accuracy of Zestimate 
+Sold <- left_join(Analysis_DF3, Deeds2, by = 'UNIQUE')
+Sold <- Sold[!is.na(Sold$Consideration),]
+Sold$Accuracy <- (Sold$Zestimate - Sold$Consideration)/ Sold$Consideration
+Accuracy <- sum(Sold$Accuracy)/248
+
 #----------------------------------------------------------------------------------
 
 ##model 
-Simple_model <- lm(Perc_Diff ~ Minority, data = Analysis_DF3)
-Assessed_model <- lm(Perc_Diff ~ Minority + B19013e1 + OVERALL.CONDITION + TOTAL.LIVING.AREA + YEAR.BUILT + YARD.SIZE + X..OF.BEDS + X..OF.BATHS, data = Analysis_DF3)
+#weight observations based on census block population
+s1 <- subset(Analysis_DF3, Perc_Diff < 4)
+s2 <- subset(Sold_Data, Perc_Diff < 4)
 
-summary(Assessed_model)
-ggplot(Assessed_model)
+Simple_model <- lm(Perc_Diff ~ Minority, data = s1)
+Assessed_model <- lm(Perc_Diff ~ Minority + B19013e1 + OVERALL.CONDITION + TOTAL.LIVING.AREA + YEAR.BUILT + YARD.SIZE + X..OF.BEDS + X..OF.BATHS, data = s1)
+#test for homoskedacity
+bptest(Assessed_model)
 
-stargazer(Simple_model, Assessed_model, type = 'text', title = 'OLS Results', align = TRUE, dep.var.labels = 'Value Gap', covariate.labels = c('Percent Minority', 'House Condition', 'Median Income', 'Square Feet', 'Yard Size', 'Beds', 'Baths'), p.auto = TRUE, digits = 3, out = 'Models.txt')
+wt <- 1 / lm(abs(Assessed_model$residuals) ~ Assessed_model$fitted.values)$fitted.values^2
+Assessed_model <- lm(Perc_Diff ~ Minority + B19013e1 + OVERALL.CONDITION + TOTAL.LIVING.AREA + YEAR.BUILT + YARD.SIZE + X..OF.BEDS + X..OF.BATHS, data = Analysis_DF3, weights = wt)
+
+Simple_Sold <- lm(Perc_Diff ~ Minority, data = s2)
+Sold_model <- lm(Perc_Diff ~ Minority + B19013e1 + OVERALL.CONDITION + TOTAL.LIVING.AREA + YEAR.BUILT + YARD.SIZE + X..OF.BEDS + X..OF.BATHS, data = s2)
+
+summary(Sold_model)
+
+wt1 <- 1 / lm(abs(Sold_model$residuals) ~ Sold_model$fitted.values)$fitted.values^2
+
+bptest(Sold_model)
 
 model <- lm(mean_price ~ Minority + Median_Inc, data = Combined_df)
 summary(model)
@@ -435,7 +503,25 @@ summary(Race_Character2$mean_price)
 Ownership_model <- lm(mean_price ~ Ownership + Minority, data = Analysis_DF)
 summary(Ownership_model)
 
-#-------------------------------------------------------------------------------
+stargazer(Simple_model, Assessed_model, Simple_Sold, Sold_model, type = 'text', title = 'OLS Results', align = TRUE, dep.var.labels = 'Value Gap', covariate.labels = c('Percent Minority', 'House Condition', 'Median Income', 'Square Feet', 'Year Built', 'Yard Size', 'Beds', 'Baths'), p.auto = TRUE, digits = 2, out = 'Models.txt')
+
+hist(s1$Perc_Diff, breaks = 50, freq = NULL, main = ' Zestimate Value Gap', xlab = 'Value Gap (Percent difference)')
+sd(s1$Perc_Diff)
+mean(s1$Perc_Diff)
+
+hist(s1$Minority, breaks = 50, freq = NULL, main = 'Minority Composition (Zestimate data)', xlab = 'Census block percent minority')
+mean(s1$Minority)
+sd(s1$Minority)
+
+hist(s2$Perc_Diff, breaks = 50, freq = NULL, main = 'Sold Value Gap', xlab = 'Value Gap (Percent difference')
+mean(s2$Perc_Diff)
+sd(s2$Perc_Diff)
+hist(s2$Minority, breaks = 50, freq = NULL, main = 'Minority Composition (Sold data)', xlab = 'Census block percent minority')
+
+s2_model <- lm(Perc_Diff ~ Minority + B19013e1 + OVERALL.CONDITION + TOTAL.LIVING.AREA + YEAR.BUILT + YARD.SIZE + X..OF.BEDS + X..OF.BATHS, data = s2)
+summary(s2_model)
+
+-------------------------------------------------------------------
 
 ###export df with variables for arcGIS
 
@@ -457,13 +543,6 @@ Arc_Map1 <- left_join(Arc_Map1, Arc_Map4, by = 'GEOID')
 
 write.csv(Arc_Map1, 'Arc_Map.csv')
 
-##sold model to show distribution of sold properties and compare accuracy with Zestimate
-Sold_scrape <- Sold_scrape %>% separate(Sold_address, c('Street', 'City', 'State'), ',', remove = FALSE)
-Sold_scrape2 <- Sold_scrape
-Sold_scrape2$Address <- paste(Sold_scrape2$Street, Sold_scrape2$City, sep = ',')
-Sold_scrape2$UNIQUE <- paste(Sold_scrape2$Address, Sold_scrape2$State, sep = ',')
-Sold_scrape2$Street <- word(Sold_scrape2$Street, 1, 2)
 
-Sold_scrape2$UNIQUE <- toupper(Sold_scrape2$UNIQUE)
 
-Sold <- left_join(Sold_scrape2, House_address, by = 'UNIQUE')
+
